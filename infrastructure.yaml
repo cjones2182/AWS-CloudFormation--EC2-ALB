@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  InstanceVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+     CidrBlock: 10.0.0.0/16
+     EnableDnsHostnames: True
+     EnableDnsSupport: True
+     Tags: 
+      - Key: Name
+        Value: instance-vpc
+  
+#=======================================================
+# Subnets us-east-1a
+#=======================================================
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InstanceVpc
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      - Key: Name
+        Value: PublicSubnet1
+    
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InstanceVpc
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      - Key: Name
+        Value: PrivateSubnet1
+
+#=======================================================
+# Subnets us-east-1b
+#=======================================================
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InstanceVpc
+      CidrBlock: 10.0.30.0/24
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      - Key: Name
+        Value: PublicSubnet2
+    
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InstanceVpc
+      CidrBlock: 10.0.40.0/24
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+      Tags:
+      - Key: Name
+        Value: PrivateSubnet2
+
+#===========================================================
+# IGW
+#===========================================================
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: 
+      - Key: Name
+        Value: InternetGateway
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: InternetGateway
+      VpcId: !Ref InstanceVpc
+
+#===========================================================
+# Route Table
+#===========================================================
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref InstanceVpc
+      Tags:
+        - Key: Name
+          Value: Instance-Route-Table
+  
+  Publicroute:
+    Type: AWS::EC2::Route
+    DependsOn: 
+      - InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+    
+  PublicSubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: PublicRouteTable
+      SubnetId: !Ref  PublicSubnet2
+  
+#===========================================================
+# ALB
+#===========================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB security group 
+      VpcId: !Ref InstanceVpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ALB-SecurityGroup
+
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+         - !Ref ALBSecurityGroup
+  
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref InstanceVpc
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      Targets:
+       - Id: !Ref EC2Instance1
+         Port: 80
+
+
+
+  AppListner:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+         - Type: forward
+           TargetGroupArn: !Ref AppTargetGroup
+# ==================================================================================
+# instance
+# ==================================================================================
+  EC2Instance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-0b245cc5f82576748
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: 
+        - !Ref InstanceSecurityGroup
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          dnf install httpd -y
+          echo "hello" >> /var/www/html/index.html
+          systemctl enable --now httpd
+      Tags:
+        - Key: Name
+          Value: EC2Instance1
+        
+
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Instance Security Group
+      VpcId: !Ref InstanceVpc
+
+  SecurityGroupIngressEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+     GroupId: !Ref InstanceSecurityGroup
+     IpProtocol: tcp
+     FromPort: 80
+     ToPort: 80
+     SourceSecurityGroupId: !Ref ALBSecurityGroup
+       
+    # ============================================================================
+    # NAT
+    # ==============================================================================
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: NAT
+      
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref InstanceVpc
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+      
+
